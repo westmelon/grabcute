@@ -6,6 +6,7 @@ const elements = {
   dashboardPanel: document.querySelector('#dashboard-panel'),
   connectionDot: document.querySelector('#connection-dot'),
   connectionLabel: document.querySelector('#connection-label'),
+  serviceToggle: document.querySelector('#service-toggle'),
   settingsToggle: document.querySelector('#settings-toggle'),
   settingsPanel: document.querySelector('#settings-panel'),
   endpointInput: document.querySelector('#endpoint-input'),
@@ -111,12 +112,16 @@ let repositoryRevision = 0;
 let repositoryTimer;
 let installedRevision = 0;
 let pluginSettingsBusy = false;
+let serviceStopped = false;
+let serviceControlBusy = false;
+let serviceOnline = false;
 
 function storageGet() {
-  if (isExtension) return chrome.storage.local.get(['endpoint', 'token']);
+  if (isExtension) return chrome.storage.local.get(['endpoint', 'token', 'stoppedEndpoint']);
   return Promise.resolve({
     endpoint: localStorage.getItem('endpoint'),
-    token: localStorage.getItem('token')
+    token: localStorage.getItem('token'),
+    stoppedEndpoint: localStorage.getItem('stoppedEndpoint')
   });
 }
 
@@ -127,6 +132,7 @@ function storageSet(values) {
 }
 
 async function fetchWithServiceWake(path, options = {}) {
+  if (serviceStopped && path !== '/api/service/stop') throw new Error('服务已停止，请点击启动服务');
   const request = () => fetch(`${settings.endpoint}${path}`, {
     ...options,
     headers: {
@@ -138,6 +144,12 @@ async function fetchWithServiceWake(path, options = {}) {
     return await request();
   } catch (error) {
     if (!isExtension || error.name === 'AbortError') throw error;
+    const stored = await storageGet();
+    if (stored.stoppedEndpoint === settings.endpoint) {
+      serviceStopped = true;
+      renderServiceControl();
+      throw new Error('服务已停止，请点击启动服务');
+    }
     const wakeResult = await chrome.runtime.sendMessage({ type: 'ensure-local-service' });
     if (!wakeResult?.ok) throw new Error(wakeResult?.error || '无法唤醒本地服务');
     return request();
@@ -174,8 +186,18 @@ function requestConfirmation({ title, message, label, action }) {
 }
 
 function setConnection(mode, label) {
+  serviceOnline = mode !== 'offline';
   elements.connectionDot.className = `status-dot ${mode}`;
   elements.connectionLabel.textContent = label;
+  renderServiceControl();
+}
+
+function renderServiceControl() {
+  const label = serviceStopped ? (isExtension ? '启动服务' : '重新连接服务') : '停止服务';
+  elements.serviceToggle.title = state.stopping && serviceOnline ? '正在停止，当前任务完成后退出' : label;
+  elements.serviceToggle.setAttribute('aria-label', elements.serviceToggle.title);
+  elements.serviceToggle.disabled = isDemo || !settings.token || serviceControlBusy || (state.stopping && serviceOnline)
+    || (!serviceStopped && !serviceOnline);
 }
 
 function hostMatches(hostname, pattern) {
@@ -204,7 +226,7 @@ function updateCurrentUrl(value) {
   const forum = supportedForum(value);
   elements.siteBadge.textContent = forum?.name || '不支持';
   elements.siteBadge.classList.toggle('unsupported', !forum);
-  elements.enqueueCurrent.disabled = !forum || !settings.token;
+  elements.enqueueCurrent.disabled = !forum || !settings.token || serviceStopped || state.stopping;
   elements.pluginActions.replaceChildren();
   for (const action of forum?.actions || []) {
     if (!new RegExp(action.pathPattern).test(new URL(value).pathname)) continue;
@@ -212,7 +234,7 @@ function updateCurrentUrl(value) {
     button.type = 'button';
     button.className = 'secondary-button';
     button.textContent = action.label;
-    button.disabled = !settings.token;
+    button.disabled = !settings.token || serviceStopped || state.stopping;
     button.addEventListener('click', () => perform(async () => {
       const url = new URL(elements.currentUrl.value);
       Object.entries(action.query).forEach(([key, item]) => url.searchParams.set(key, item));
@@ -229,7 +251,7 @@ function updateCurrentUrl(value) {
   elements.pluginLogin.textContent = loginStatus === 'open' ? '完成登录'
     : loginStatus === 'opening' ? '正在打开登录窗口…'
       : loginStatus === 'closing' ? '正在关闭登录窗口…' : `登录 ${forum?.name || ''}`;
-  elements.pluginLogin.disabled = isDemo || !settings.token || state.running || Boolean(state.pluginOperation)
+  elements.pluginLogin.disabled = isDemo || serviceStopped || state.stopping || !settings.token || state.running || Boolean(state.pluginOperation)
     || Boolean(loginStatus && loginStatus !== 'open');
   elements.pluginLogin.title = state.running ? '任务运行中，请等待完成后再登录' : '';
   elements.pluginLoginHint.textContent = loginStatus
@@ -372,7 +394,7 @@ function render(nextState = state) {
   state = nextState;
   updateCurrentUrl(elements.currentUrl.value);
   elements.headlessToggle.checked = Boolean(state.browser?.headless);
-  elements.headlessToggle.disabled = isDemo || state.running || Boolean(state.browser?.loginStatus) || Boolean(state.pluginOperation) || !settings.token;
+  elements.headlessToggle.disabled = isDemo || serviceStopped || state.stopping || state.running || Boolean(state.browser?.loginStatus) || Boolean(state.pluginOperation) || !settings.token;
   elements.headlessControl.title = state.running || state.browser?.loginStatus || state.pluginOperation
     ? '任务运行、登录或插件管理期间，暂时不能切换'
     : '隐藏自动化浏览器窗口';
@@ -381,9 +403,10 @@ function render(nextState = state) {
   elements.pauseToggle.replaceChildren(icon(state.paused ? 'play' : 'pause'));
   elements.pauseToggle.title = state.paused ? '继续队列' : '暂停队列';
   elements.pauseToggle.setAttribute('aria-label', elements.pauseToggle.title);
-  elements.retryAll.disabled = !state.tasks.some((task) => task.status === 'failed' || task.status === 'action-required');
+  elements.pauseToggle.disabled = serviceStopped || state.stopping;
+  elements.retryAll.disabled = serviceStopped || state.stopping || !state.tasks.some((task) => task.status === 'failed' || task.status === 'action-required');
   setConnection(state.running || state.browser?.loginStatus || state.pluginOperation ? 'busy' : 'online',
-    state.pluginOperation || (state.browser?.loginStatus ? '等待完成登录' : state.running ? '正在处理' : state.paused ? '已暂停' : '服务在线'));
+    state.stopping ? '正在停止，等待当前操作完成' : state.pluginOperation || (state.browser?.loginStatus ? '等待完成登录' : state.running ? '正在处理' : state.paused ? '已暂停' : '服务在线'));
 
   const tasks = state.tasks.filter(taskFilter).reverse();
   elements.taskList.replaceChildren(...tasks.map(createTaskRow));
@@ -469,7 +492,7 @@ async function refreshInstalledPlugins() {
 }
 
 function repositoryUnavailable() {
-  return isDemo || !settings.token || pluginSettingsBusy || state.running || Boolean(state.browser?.loginStatus) || Boolean(state.pluginOperation);
+  return isDemo || serviceStopped || state.stopping || !settings.token || pluginSettingsBusy || state.running || Boolean(state.browser?.loginStatus) || Boolean(state.pluginOperation);
 }
 
 function setRepositoryStatus(message, error = false) {
@@ -670,6 +693,7 @@ elements.repositoryPlugins.addEventListener('click', async (event) => {
 });
 
 async function connectEvents() {
+  if (serviceStopped) return;
   eventAbortController?.abort();
   if (!settings.token || isDemo) return;
   eventAbortController = new AbortController();
@@ -694,13 +718,16 @@ async function connectEvents() {
     }
   } catch (error) {
     if (error.name === 'AbortError') return;
+    const stored = await storageGet();
+    serviceStopped = stored.stoppedEndpoint === settings.endpoint;
+    if (serviceStopped) { setConnection('offline', '服务已停止'); return; }
     setConnection('offline', '服务离线');
     setTimeout(connectEvents, 2000);
   }
 }
 
 async function refresh() {
-  if (isDemo) return;
+  if (isDemo || serviceStopped) return;
   try {
     render(await api('/api/state'));
   } catch (error) {
@@ -722,12 +749,45 @@ elements.settingsToggle.addEventListener('click', () => {
   showView(elements.settingsPanel.hidden ? 'settings' : 'dashboard');
 });
 
+elements.serviceToggle.addEventListener('click', async () => {
+  if (elements.serviceToggle.disabled) return;
+  serviceControlBusy = true;
+  const starting = serviceStopped;
+  try {
+    serviceStopped = !starting;
+    await storageSet({ stoppedEndpoint: serviceStopped ? settings.endpoint : '' });
+    renderServiceControl();
+    if (starting) {
+      state.stopping = false;
+      render(await api('/api/state'));
+      connectEvents();
+    } else {
+      const result = await api('/api/service/stop', { method: 'POST' });
+      state = result.state;
+      if (serviceOnline) render(state);
+      else renderServiceControl();
+      showNotice('正在停止服务；当前任务完成后退出，等待任务会保留');
+    }
+  } catch (error) {
+    serviceStopped = starting;
+    await storageSet({ stoppedEndpoint: serviceStopped ? settings.endpoint : '' });
+    showNotice(error.message);
+    if (starting) setConnection('offline', '服务已停止');
+    else { await refresh(); connectEvents(); }
+  } finally {
+    serviceControlBusy = false;
+    renderServiceControl();
+  }
+});
+
 elements.saveSettings.addEventListener('click', async () => {
   settings = {
     endpoint: elements.endpointInput.value.replace(/\/$/, '') || DEFAULT_ENDPOINT,
     token: elements.tokenInput.value.trim()
   };
   await storageSet(settings);
+  serviceStopped = false;
+  await storageSet({ stoppedEndpoint: '' });
   showView('dashboard');
   updateCurrentUrl(elements.currentUrl.value);
   await refresh();
@@ -861,6 +921,8 @@ async function initialize() {
   };
   elements.endpointInput.value = settings.endpoint;
   elements.tokenInput.value = settings.token;
+  serviceStopped = stored.stoppedEndpoint === settings.endpoint;
+  renderServiceControl();
   await readCurrentTab();
 
   if (isDemo) {
@@ -887,6 +949,7 @@ async function initialize() {
     setConnection('offline', '需要令牌');
     return;
   }
+  if (serviceStopped) { setConnection('offline', '服务已停止'); return; }
   await refresh();
   connectEvents();
 }

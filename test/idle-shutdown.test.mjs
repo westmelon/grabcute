@@ -20,6 +20,22 @@ function createWorker(initialState) {
   };
 }
 
+test('manual shutdown works with idle exit disabled and while tasks are pending', async () => {
+  const worker = createWorker({ running: true, tasks: [{ status: 'pending' }] });
+  const signals = new EventEmitter();
+  const controller = new AbortController();
+  const shutdown = waitForShutdown({ worker, idleShutdownMs: 0, signalEmitter: signals,
+    shutdownSignal: controller.signal });
+  controller.abort();
+  assert.equal(await shutdown, 'manual');
+  assert.equal(worker.listenerCount(), 0);
+  assert.equal(signals.listenerCount('SIGTERM'), 0);
+  const aborted = await waitForShutdown({ worker, idleShutdownMs: 0, signalEmitter: signals,
+    shutdownSignal: controller.signal });
+  assert.equal(aborted, 'manual');
+  assert.equal(worker.listenerCount(), 0);
+});
+
 test('waitForShutdown stops after the queue remains idle', async () => {
   const worker = createWorker({ running: false, tasks: [] });
   const signals = new EventEmitter();

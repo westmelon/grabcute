@@ -4,6 +4,16 @@ import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 
 const commitPattern = /^[a-f0-9]{40}$/i;
 
+function rawSource(segments) {
+  // GitHub 的 Raw 按钮也会生成 /refs/heads/<branch>/ 或 /refs/tags/<tag>/ 地址。
+  const explicitRef = segments[2] === 'refs' && ['heads', 'tags'].includes(segments[3]);
+  const offset = explicitRef ? 5 : 3;
+  if (segments.length <= offset || segments.at(-1) !== 'repository.json') {
+    throw new Error('raw 地址必须指向 repository.json；含斜杠的分支请改用仓库地址和版本栏');
+  }
+  return { version: segments.slice(2, offset).join('/'), prefix: segments.slice(offset, -1).join('/') };
+}
+
 export function normalizeRepository(repository) {
   if (typeof repository !== 'string' || !repository.trim() || repository.startsWith('-')) {
     throw new Error('请指定公开 GitHub 仓库、raw 索引地址或本地目录');
@@ -25,9 +35,7 @@ export function normalizeRepository(repository) {
     if (segments.length !== 2) throw new Error('请填写 GitHub 仓库根地址，版本填写到版本栏');
     return `https://github.com/${segments[0]}/${segments[1].replace(/\.git$/, '')}`;
   }
-  if (segments.length < 4 || segments.at(-1) !== 'repository.json') {
-    throw new Error('raw 地址必须指向 repository.json；含斜杠的分支请改用仓库地址和版本栏');
-  }
+  rawSource(segments);
   return url.href;
 }
 
@@ -42,7 +50,18 @@ async function request(url) {
   }
   if (!response.ok) {
     if (response.status === 404) throw new Error('插件仓库或版本不存在，请确认仓库已公开');
-    if ([403, 429].includes(response.status)) throw new Error('GitHub 访问受限或请求次数已用完，请稍后重试');
+    if ([403, 429].includes(response.status)) {
+      const api = new URL(url).hostname === 'api.github.com';
+      if (api && response.headers.get('x-ratelimit-remaining') === '0') {
+        const reset = Number(response.headers.get('x-ratelimit-reset'));
+        const resetDate = new Date(reset * 1000);
+        const retry = reset > 0 && Number.isFinite(resetDate.getTime())
+          ? `，预计 ${resetDate.toISOString().replace('T', ' ').replace('.000Z', ' UTC')} 恢复` : '，请稍后重试';
+        throw new Error(`GitHub API 匿名请求次数已用完${retry}；raw 地址也需要访问 API。可下载仓库 ZIP 并解压，使用本地目录安装`);
+      }
+      if (response.status === 429) throw new Error('GitHub 请求过于频繁（HTTP 429），请稍后重试；也可使用已下载的本地仓库目录安装');
+      throw new Error('GitHub 拒绝访问（HTTP 403），请检查网络访问限制及仓库权限；也可使用已下载的本地仓库目录安装');
+    }
     throw new Error(`插件下载失败：HTTP ${response.status}`);
   }
   return response;
@@ -81,8 +100,9 @@ export async function checkoutRepository(checkout, repository, ref) {
   const segments = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
   const [owner, repo] = segments;
   const raw = url.hostname === 'raw.githubusercontent.com';
-  const prefix = raw ? segments.slice(3, -1).join('/') : '';
-  const version = ref === 'HEAD' && raw ? segments[2] : ref;
+  const source = raw ? rawSource(segments) : { prefix: '' };
+  const { prefix } = source;
+  const version = ref === 'HEAD' && raw ? source.version : ref;
   const api = `https://api.github.com/repos/${owner}/${repo}`;
   let commit = version;
   if (!commitPattern.test(commit)) {

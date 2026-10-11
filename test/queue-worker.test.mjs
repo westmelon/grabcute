@@ -9,6 +9,37 @@ import { EventEmitter } from 'node:events';
 const testPlugins = { manifests: [{ id: 'example-login', type: 'forum', hosts: ['example.com'],
   loginUrl: 'https://example.com/login' }] };
 
+test('manual stop finishes the current task, preserves pending tasks and closes the browser', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'worker-stop-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const queue = await new TaskQueue(path.join(root, 'tasks.json')).open();
+  t.after(() => queue.close());
+  await queue.enqueue(['https://example.com/one', 'https://example.com/two']);
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  let browserClosed = false;
+  const worker = new QueueWorker({ queue, config: {}, log: () => {},
+    browserLauncher: async () => ({ close: async () => { browserClosed = true; } }),
+    workflowFactory: () => ({ run: async (_context, _url, { signal }) => {
+      started(); await held; assert.equal(signal.aborted, false);
+      return { source: {}, results: [] };
+    } }) });
+  const running = worker.kick();
+  await ready;
+  worker.requestStop();
+  assert.equal(worker.state().stopping, true);
+  let closed = false;
+  const closing = worker.close().then(() => { closed = true; });
+  await new Promise(setImmediate);
+  assert.equal(closed, false);
+  release();
+  await Promise.all([running, closing]);
+  assert.deepEqual(queue.tasks().map(task => task.status), ['completed', 'pending']);
+  assert.equal(browserClosed, true);
+});
+
 test('uninstall reloads plugins before queue guards are released and pauses on reload failure', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'uninstall-worker-'));
   t.after(() => rm(root, { recursive: true, force: true }));

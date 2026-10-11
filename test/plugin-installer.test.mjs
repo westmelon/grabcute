@@ -297,6 +297,41 @@ test('raw index downloads nested imports and fixes every request to the resolved
   assert.ok(urls.filter((url) => url.includes('raw.githubusercontent.com')).every((url) => /\/[a-f0-9]{40}\//.test(url)));
 });
 
+test('GitHub raw button URLs resolve full branch and tag refs with the correct index directory', async (t) => {
+  const f = await fixture(t);
+  await addCatalog(f);
+  await f.git('branch', 'main');
+  await f.git('tag', 'release');
+  await mkdir(path.join(f.repository, 'catalog'));
+  await writeFile(path.join(f.repository, 'catalog/repository.json'), await readFile(path.join(f.repository, 'repository.json')));
+  await mkdir(path.join(f.repository, 'catalog/plugins/sample'), { recursive: true });
+  await writeFile(path.join(f.repository, 'catalog/plugins/sample/plugin.json'), JSON.stringify(manifest));
+  await writeFile(path.join(f.repository, 'catalog/plugins/sample/index.mjs'), source(5));
+  await f.version('nested', source(2));
+  const urls = [
+    ['refs/heads/main', 1],
+    ['refs/tags/release', 1],
+    ['refs/tags/nested/catalog', 5]
+  ];
+  for (const [index, [address, version]] of urls.entries()) {
+    const repository = `https://raw.githubusercontent.com/example/plugins/${address}/repository.json`;
+    const catalog = await readPluginRepository({ repository });
+    assert.equal(catalog.plugins[0].id, 'sample');
+    const result = await managePlugin({ ...f.options, repository, ref: catalog.commit,
+      action: index === 0 ? 'install' : 'update' });
+    assert.equal(result.commit, catalog.commit);
+    assert.equal(await readFile(path.join(f.directory, 'sample/index.mjs'), 'utf8'), source(version));
+  }
+  const requests = globalThis.fetch.mock.calls.map((call) => call.arguments[0]);
+  assert.ok(requests.some((url) => url.endsWith('/commits/refs%2Fheads%2Fmain')));
+  assert.ok(requests.some((url) => url.endsWith('/commits/refs%2Ftags%2Frelease')));
+  assert.ok(!requests.some((url) => url.endsWith('/commits/refs')));
+  // v1 没有索引；显式版本应覆盖 raw 地址中的 main，而不是静默读取 main。
+  await assert.rejects(() => readPluginRepository({
+    repository: 'https://raw.githubusercontent.com/example/plugins/refs/heads/main/repository.json', ref: 'v1'
+  }), /缺少 repository.json/);
+});
+
 test('raw checksum failures and rate limits preserve installed files and remove staging', async (t) => {
   const f = await fixture(t);
   await managePlugin({ ...f.options, action: 'install' });
@@ -305,10 +340,25 @@ test('raw checksum failures and rate limits preserve installed files and remove 
   t.mock.method(globalThis, 'fetch', async (url) => url.includes('raw.githubusercontent.com')
     ? new Response('corrupted') : originalFetch(url));
   await assert.rejects(() => managePlugin({ ...f.options, ref: 'changed', action: 'update' }), /校验失败/);
-  t.mock.method(globalThis, 'fetch', async () => new Response('', { status: 403 }));
+  t.mock.method(globalThis, 'fetch', async () => new Response('', { status: 403,
+    headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1791635086' } }));
   await assert.rejects(() => managePlugin({ ...f.options, ref: 'changed', action: 'update' }), /请求次数/);
   assert.equal(await readFile(path.join(f.directory, 'sample', 'index.mjs'), 'utf8'), source(1));
   assert.deepEqual((await readdir(f.root)).sort(), ['installed', 'source repository']);
+});
+
+test('GitHub errors distinguish API quota exhaustion, forbidden access and throttling', async (t) => {
+  const f = await fixture(t);
+  for (const [status, headers, message] of [
+    [403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1791635086' },
+      /API 匿名请求次数已用完.*2026-10-10 12:24:46 UTC.*本地目录安装/],
+    [403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': 'invalid' }, /请求次数已用完，请稍后重试/],
+    [403, {}, /拒绝访问（HTTP 403）.*网络访问限制/],
+    [429, {}, /请求过于频繁（HTTP 429）/]
+  ]) {
+    t.mock.method(globalThis, 'fetch', async () => new Response('', { status, headers }));
+    await assert.rejects(() => readPluginRepository({ repository: f.options.repository }), message);
+  }
 });
 
 test('unsafe GitHub tree paths and truncated trees are rejected before writing files', async (t) => {
@@ -339,6 +389,10 @@ test('repository addresses reject SSH, credentials and non-GitHub destinations',
     'https://token@github.com/example/plugins', 'https://example.com/repository.json',
     'https://github.com/example/plugins?token=secret']) {
     assert.throws(() => normalizeRepository(value), /仅支持/);
+  }
+  for (const value of ['https://raw.githubusercontent.com/example/plugins/refs/heads/repository.json',
+    'https://raw.githubusercontent.com/example/plugins/refs/tags/repository.json']) {
+    assert.throws(() => normalizeRepository(value), /必须指向 repository.json/);
   }
 });
 

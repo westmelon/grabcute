@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import http from 'node:http';
@@ -31,7 +31,8 @@ async function readJson(request) {
 }
 
 export class LocalApiServer {
-  constructor({ worker, token, downloadRoot, staticDirectory, pluginManager, port = 43127, log = console.error }) {
+  constructor({ worker, token, downloadRoot, staticDirectory, pluginManager, port = 43127, log = console.error,
+    spawnProcess = spawn, requestShutdown }) {
     this.worker = worker;
     this.pluginManager = pluginManager;
     this.token = token;
@@ -39,6 +40,8 @@ export class LocalApiServer {
     this.staticDirectory = path.resolve(staticDirectory);
     this.port = port;
     this.log = log;
+    this.spawnProcess = spawnProcess;
+    this.requestShutdown = requestShutdown;
     this.clients = new Set();
     this.server = http.createServer((request, response) => {
       this.handle(request, response).catch((error) => {
@@ -113,6 +116,16 @@ export class LocalApiServer {
     if (!this.allowedOrigin(request.headers.origin)) return this.sendJson(response, 403, { error: 'Origin is not allowed' });
     if (!bearerMatches(request.headers.authorization, this.token)) {
       return this.sendJson(response, 401, { error: 'Invalid local service token' });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/service/stop') {
+      if (!this.requestShutdown) throw new Error('服务停止功能未配置');
+      this.worker.requestStop();
+      response.once('finish', () => this.requestShutdown());
+      return this.sendJson(response, 202, { stopping: true, state: this.worker.state() });
+    }
+    if (request.method !== 'GET' && this.worker.state().stopping) {
+      throw new Error('服务正在停止，请等待退出');
     }
 
     if (request.method === 'GET' && url.pathname === '/api/state') {
@@ -220,8 +233,18 @@ export class LocalApiServer {
       if (!directory || !relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
         throw new Error('Task does not have a valid archive directory');
       }
-      const child = spawn(process.platform === 'win32' ? 'explorer.exe' : '/usr/bin/open', [directory], {
-        detached: true, stdio: 'ignore', windowsHide: true
+      let info;
+      try { info = await stat(directory); }
+      catch (error) {
+        if (['ENOENT', 'ENOTDIR'].includes(error.code)) throw new Error(`任务目录不存在或已被移动：${directory}`);
+        throw error;
+      }
+      if (!info.isDirectory()) throw new Error(`任务归档路径不是目录：${directory}`);
+      const windows = process.platform === 'win32';
+      // Explorer 将逗号视为参数分隔符，需要始终保留路径两侧的引号；窗口必须可见。
+      const child = this.spawnProcess(windows ? 'explorer.exe' : '/usr/bin/open', windows ? [`"${directory}"`] : [directory], {
+        detached: true, stdio: 'ignore', windowsHide: false,
+        ...(windows ? { windowsVerbatimArguments: true } : {})
       });
       await once(child, 'spawn');
       child.unref();

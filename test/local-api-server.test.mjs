@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import os from 'node:os';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { LocalApiServer } from '../src/core/local-api-server.mjs';
@@ -20,6 +23,101 @@ function createResponse() {
     }
   };
 }
+
+test('service stop checks token and origin, acknowledges before shutdown and blocks further mutations', async (t) => {
+  const calls = [];
+  let stopping = false;
+  const token = 'service-stop-token';
+  const server = new LocalApiServer({ token, downloadRoot: '/tmp/downloads', staticDirectory: 'extension',
+    worker: { subscribe: () => () => {}, state: () => ({ stopping, tasks: [] }),
+      requestStop: () => { calls.push('pause'); stopping = true; },
+      enqueue: () => { assert.fail('cannot enqueue while stopping'); } },
+    requestShutdown: () => { calls.push('shutdown'); } });
+  t.after(() => server.unsubscribe());
+  for (const [headers, expected] of [[{}, 401],
+    [{ authorization: `Bearer ${token}`, origin: 'https://untrusted.example' }, 403],
+    [{ authorization: `Bearer ${token}` }, 202]]) {
+    const request = Readable.from([]);
+    Object.assign(request, { method: 'POST', url: '/api/service/stop', headers });
+    const response = Object.assign(new EventEmitter(), createResponse());
+    await server.handle(request, response);
+    assert.equal(response.status, expected);
+    if (expected === 202) {
+      assert.deepEqual(calls, ['pause']);
+      assert.equal(JSON.parse(response.body).stopping, true);
+      response.emit('finish');
+      assert.deepEqual(calls, ['pause', 'shutdown']);
+    } else assert.equal(calls.length, 0);
+  }
+  const request = Readable.from([Buffer.from(JSON.stringify({ urls: ['https://example.com/new'] }))]);
+  Object.assign(request, { method: 'POST', url: '/api/tasks', headers: { authorization: `Bearer ${token}` } });
+  await assert.rejects(() => server.handle(request, createResponse()), /服务正在停止/);
+});
+
+test('open-directory launches a visible file manager with the complete archive path and validates the task directory', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'open-archive-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, "中文 任务, user's & 第1集");
+  await mkdir(directory);
+  const token = 'archive-test-token';
+  let archive = directory;
+  let spawnError;
+  const calls = [];
+  let unrefCount = 0;
+  const server = new LocalApiServer({ token, downloadRoot: root, staticDirectory: path.resolve('extension'),
+    worker: { subscribe: () => () => {},
+      state: () => ({ tasks: [{ id: 'completed-task', status: 'completed', summary: { directory: archive } }] }) },
+    spawnProcess: (...args) => {
+      calls.push(args);
+      const child = new EventEmitter();
+      child.unref = () => { unrefCount += 1; };
+      queueMicrotask(() => spawnError ? child.emit('error', spawnError) : child.emit('spawn'));
+      return child;
+    } });
+  t.after(() => server.unsubscribe());
+  async function open({ taskId = 'completed-task', headers = { authorization: `Bearer ${token}` } } = {}) {
+    const request = Readable.from([Buffer.from(JSON.stringify({ taskId }))]);
+    Object.assign(request, { method: 'POST', url: '/api/open-directory', headers });
+    const response = createResponse();
+    await server.handle(request, response);
+    return response;
+  }
+  for (const [headers, status] of [[{}, 401],
+    [{ authorization: `Bearer ${token}`, origin: 'https://untrusted.example' }, 403]]) {
+    assert.equal((await open({ headers })).status, status);
+  }
+  assert.equal(calls.length, 0);
+  const response = await open();
+  assert.equal(response.status, 202);
+  assert.deepEqual(JSON.parse(response.body), { opened: true });
+  const [command, args, options] = calls[0];
+  assert.equal(options.windowsHide, false);
+  assert.equal(options.shell, undefined);
+  if (process.platform === 'win32') {
+    assert.equal(command, 'explorer.exe');
+    assert.deepEqual(args, [`"${directory}"`]);
+    assert.equal(options.windowsVerbatimArguments, true);
+  } else {
+    assert.equal(command, '/usr/bin/open');
+    assert.deepEqual(args, [directory]);
+  }
+  assert.equal(unrefCount, 1);
+  await assert.rejects(() => open({ taskId: 'unknown-task' }), /valid archive directory/);
+  for (const invalid of [root, path.join(root, '..', 'outside-task')]) {
+    archive = invalid;
+    await assert.rejects(() => open(), /valid archive directory/);
+  }
+  archive = path.join(root, 'missing-task');
+  await assert.rejects(() => open(), /任务目录不存在或已被移动/);
+  archive = path.join(root, 'file.txt');
+  await writeFile(archive, 'file');
+  await assert.rejects(() => open(), /不是目录/);
+  assert.equal(calls.length, 1);
+  archive = directory;
+  spawnError = new Error('Explorer could not start');
+  await assert.rejects(() => open(), /Explorer could not start/);
+  assert.equal(unrefCount, 1);
+});
 
 test('LocalApiServer authenticates API calls and serves the dashboard', async (t) => {
   let listener;

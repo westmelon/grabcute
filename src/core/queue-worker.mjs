@@ -47,6 +47,7 @@ export class QueueWorker {
     return {
       paused: this.paused,
       running: this.running,
+      stopping: this.closing,
       activeTaskId: this.currentTaskId,
       browser: { headless: Boolean(this.config.browser?.headless), loginStatus: this.loginStatus,
         loginPluginId: this.loginPluginId },
@@ -344,9 +345,14 @@ export class QueueWorker {
     }
   }
 
-  async close() {
+  requestStop() {
     this.closing = true;
     this.paused = true;
+    this.notify();
+  }
+
+  async close() {
+    this.requestStop();
     if (this.loginPromise) await this.loginPromise.catch(() => {});
     if (this.pluginPromise) await this.pluginPromise.catch(() => {});
     if (this.runPromise) await this.runPromise;

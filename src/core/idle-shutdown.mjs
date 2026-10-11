@@ -4,7 +4,7 @@ function hasActiveTasks(state) {
   ));
 }
 
-export function waitForShutdown({ worker, idleShutdownMs, signalEmitter = process }) {
+export function waitForShutdown({ worker, idleShutdownMs, signalEmitter = process, shutdownSignal }) {
   return new Promise((resolve) => {
     let idleTimer;
     let stopping = false;
@@ -14,6 +14,7 @@ export function waitForShutdown({ worker, idleShutdownMs, signalEmitter = proces
       unsubscribe();
       signalEmitter.removeListener('SIGINT', onSigint);
       signalEmitter.removeListener('SIGTERM', onSigterm);
+      shutdownSignal?.removeEventListener('abort', onRequest);
     };
     const stop = (reason) => {
       if (stopping) return;
@@ -23,6 +24,7 @@ export function waitForShutdown({ worker, idleShutdownMs, signalEmitter = proces
     };
     const onSigint = () => stop('SIGINT');
     const onSigterm = () => stop('SIGTERM');
+    const onRequest = () => stop('manual');
     const schedule = (state) => {
       clearTimeout(idleTimer);
       if (!idleShutdownMs || hasActiveTasks(state)) return;
@@ -36,6 +38,8 @@ export function waitForShutdown({ worker, idleShutdownMs, signalEmitter = proces
     const unsubscribe = worker.subscribe(schedule);
     signalEmitter.on('SIGINT', onSigint);
     signalEmitter.on('SIGTERM', onSigterm);
+    shutdownSignal?.addEventListener('abort', onRequest, { once: true });
     schedule(worker.state());
+    if (shutdownSignal?.aborted) onRequest();
   });
 }

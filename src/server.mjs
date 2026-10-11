@@ -65,13 +65,15 @@ async function main() {
     persistBrowserHeadless: (headless) => updateBrowserHeadless(args.config, headless)
   });
   const staticDirectory = fileURLToPath(new URL('../extension/', import.meta.url));
+  const shutdownController = new AbortController();
   const api = new LocalApiServer({
     worker,
     token,
     downloadRoot: config.downloadRoot,
     staticDirectory,
     pluginManager: new PluginManager({ config, configPath: args.config }),
-    port: config.server.port
+    port: config.server.port,
+    requestShutdown: () => shutdownController.abort()
   });
 
   try {
@@ -92,7 +94,8 @@ async function main() {
     }
     const shutdown = waitForShutdown({
       worker,
-      idleShutdownMs: config.server.idleShutdownMs
+      idleShutdownMs: config.server.idleShutdownMs,
+      shutdownSignal: shutdownController.signal
     });
     worker.kick();
     const reason = await shutdown;
@@ -100,10 +103,10 @@ async function main() {
       ? '[resource-downloader] Stopping after the idle timeout.'
       : '[resource-downloader] Stopping after the current task.');
   } finally {
-    await api.close().catch(() => {});
     try {
       await worker.close();
     } finally {
+      await api.close().catch(() => {});
       await queue.close();
     }
   }

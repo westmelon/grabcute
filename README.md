@@ -95,7 +95,7 @@ npm run install:native-host -- --config config.json
 4. 首次连接窗口会显示服务地址和扩展目录，点击“复制令牌”，在 Chrome 加载包内的 `extension` 目录后，将令牌粘贴到扩展连接设置并保存。自动打开的网页界面也使用相同的地址和令牌。
 5. 以后打开扩展即可自动拉起服务；双击 EXE 可再次启动服务并打开网页界面。移动便携包后，再双击一次更新启动器注册。
 
-便携版不安装开机启动项，也不需要保留终端。配置、任务记录、登录资料和已安装插件保存在便携目录，后台日志默认在 `.data/server.log`。更新时先停止旧服务，用新包替换程序文件，保留 `config.json`、`.data`、`plugins` 和插件备份；运行中的文件不要直接覆盖。当前 EXE 未签名，Windows 可能显示未知发布者提示。插件来源需要公开可访问的 GitHub 仓库，也支持本地插件目录。
+便携版不安装开机启动项，也不需要保留终端。点击侧边栏或仪表盘右上角的电源按钮「停止服务」，服务会停止取新任务，等当前下载或插件操作完成后关闭浏览器并退出；等待任务、配置和已下载文件会保留。手动停止后扩展不会自动唤醒，点击同一按钮「启动服务」恢复；普通网页需双击 `lulucute.exe` 启动，再点击「重新连接服务」。配置、任务记录、登录资料和已安装插件保存在便携目录，后台日志默认在 `.data/server.log`。更新时先停止旧服务，用新包替换程序文件，保留 `config.json`、`.data`、`plugins` 和插件备份；运行中的文件不要直接覆盖。当前 EXE 未签名，Windows 可能显示未知发布者提示。插件来源需要公开可访问的 GitHub 仓库，也支持本地插件目录。
 
 开发者可在 Windows 使用 64 位 Node.js 构建：
 
@@ -148,9 +148,9 @@ ZIP 仅包含 Chrome 扩展。仍需按上面的安装步骤在本机安装项�
 
 页面顶部点击「插件安装」（拼图图标），无需填写仓库即可查看已安装插件的名称和配置启用状态，可手动刷新，安装成功后自动更新。已安装插件旁可点击「禁用」或「启用」，只保存配置，保留插件文件。点击「卸载」并确认后，删除该插件、附带工具和全部更新备份，自动重新加载服务；已下载文件、登录资料和用户自行安装的系统工具保留。安装或更改启用配置后点击「重新加载服务」，服务会读取插件配置并刷新站点识别与下载处理器，页面连接和队列暂停状态保持不变；失败时保留原运行插件。下载、登录或其他插件操作期间不能更改配置或重新加载。已安装列表和仓库列表均按「网站插件」「网盘插件」分组：`forum`、`bundle` 为网站插件，`provider` 为网盘插件。填入公开 GitHub 仓库、raw 索引地址或本地绝对路径后自动列出可安装插件。版本留空读取默认分支，也可指定标签或 commit；选择列表中的插件安装，可勾选安装后启用，重新加载服务后生效。列表显示已安装状态与 API 兼容性，已安装插件仍通过命令行更新或回滚。
 
-官方插件仓库为 [lulucute-plugins](https://github.com/westmelon/lulucute-plugins)，安装地址使用 `https://github.com/westmelon/lulucute-plugins` 或 `https://raw.githubusercontent.com/westmelon/lulucute-plugins/main/repository.json`，仓库需要设为 Public，也支持本地目录绝对路径。自动发现需要所选版本包含根目录 `repository.json`。安装固定到展示列表的 commit，不会因为默认分支更新而安装不同内容。读取或安装期间保持连接，下载与登录期间暂不能管理插件。通用结构与接口见 [插件仓库规范 v1](docs/plugin-repository.md)。
+官方插件仓库为 [lulucute-plugins](https://github.com/westmelon/lulucute-plugins)，安装地址使用 `https://github.com/westmelon/lulucute-plugins` 或 `https://raw.githubusercontent.com/westmelon/lulucute-plugins/main/repository.json`，也支持 GitHub Raw 按钮生成的 `https://raw.githubusercontent.com/westmelon/lulucute-plugins/refs/heads/main/repository.json`。仓库需要设为 Public，也支持本地目录绝对路径。自动发现需要所选版本包含根目录 `repository.json`。安装固定到展示列表的 commit，不会因为默认分支更新而安装不同内容。读取或安装期间保持连接，下载与登录期间暂不能管理插件。通用结构与接口见 [插件仓库规范 v1](docs/plugin-repository.md)。
 
-站点插件的源码、测试和具体使用说明由独立的 [lulucute-plugins](https://github.com/westmelon/lulucute-plugins) 仓库维护。安装器通过 GitHub API 获取版本和文件列表，再通过 raw 下载文件并校验，不需要 Git、SSH 或登录。私有仓库和 SSH 地址不受支持；GitHub 匿名 API 有请求频率限制，受限时稍后重试。主项目的 `plugins/` 仅存放已安装的副本，不纳入主项目版本控制。
+站点插件的源码、测试和具体使用说明由独立的 [lulucute-plugins](https://github.com/westmelon/lulucute-plugins) 仓库维护。安装器通过 GitHub API 获取版本和文件列表，再通过 raw 下载文件并校验，不需要 Git、SSH 或登录。私有仓库和 SSH 地址不受支持；GitHub 匿名 API 有请求频率限制，raw 地址安装也受此限制。额度耗尽时会显示 GitHub 返回的预计恢复时间（UTC）；可等待恢复，或从仓库页面选择 Code → Download ZIP，解压后填写包含 `repository.json` 和 `plugins/` 的目录绝对路径，版本留空，读取插件源码不再调用 GitHub API。插件声明的外部工具仍需联网下载。主项目的 `plugins/` 仅存放已安装的副本，不纳入主项目版本控制。
 
 支持公开 GitHub HTTPS、raw 索引地址和本地目录。仓库约定每个插件位于 `plugins/<id>/`；下载指定版本的文件后安装选中的插件包。已安装插件从旧版 SSH 来源更新时，需要重新指定公开 HTTPS 地址：
 
